@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdint.h>
 
 #define ALIGNMENT 16 /**< The alignment of the memory blocks */
 #define MAGIC_NUMBER 0x01234567 /**< Magic number for error checking */
@@ -171,6 +172,7 @@ void *tumalloc(size_t size) {
     if (size == 0) {
         return NULL;
     }
+
     // Align size to be a multiple of ALIGNMENT
     size = (size + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
 
@@ -179,29 +181,42 @@ void *tumalloc(size_t size) {
         return do_alloc(size);
     }
     
-    // Search the free list for a block big enough
+    // Search the free list for a block using Best Fit strategy
     free_block *curr = HEAD;
+    free_block *best_fit = NULL;
+    size_t best_fit_size = (size_t)-1;  // Start with maximum possible value
     
+    // First pass: find the best fitting block
     while (curr != NULL) {
-        // Check if current block is big enough
-        if (curr->size >= size) {
-            // Split the block if it's large enough
-            header *h = (header *)split(curr, size);
+        // Check if current block is big enough and better than what we've found so far
+        if (curr->size >= size && curr->size < best_fit_size) {
+            best_fit = curr;
+            best_fit_size = curr->size;
             
-            if (h != NULL) {
-                // Remove the block from the free list
-                remove_free_block(curr);
-                
-                // Set up the header
-                h->size = size;
-                h->magic = MAGIC_NUMBER;
-                
-                // Return pointer after the header
-                return (void *)((char *)h + sizeof(header));
+            // If we find a perfect fit, stop searching
+            if (curr->size == size) {
+                break;
             }
         }
-        
         curr = curr->next;
+    }
+    
+    // If we found a block that fits
+    if (best_fit != NULL) {
+        // Split the block if it's large enough
+        header *h = (header *)split(best_fit, size);
+        
+        if (h != NULL) {
+            // Remove the block from the free list
+            remove_free_block(best_fit);
+            
+            // Set up the header
+            h->size = size;
+            h->magic = MAGIC_NUMBER;
+            
+            // Return pointer after the header
+            return (void *)((char *)h + sizeof(header));
+        }
     }
     
     // No suitable block found, allocate from the OS
