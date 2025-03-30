@@ -5,13 +5,13 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
-#include <stdint.h>
 
 #define ALIGNMENT 16 /**< The alignment of the memory blocks */
 #define MAGIC_NUMBER 0x01234567 /**< Magic number for error checking */
 #define FREED_MAGIC 0xCAFEBABE /**< Magic number for freed blocks */
 
 static free_block *HEAD = NULL; /**< Pointer to the first element of the free list */
+static free_block *LAST_ALLOCATION_POINT = NULL; /**< Pointer to the block after the last allocated block for Next Fit */
 
 /**
  * Split a free block into two blocks
@@ -77,6 +77,11 @@ free_block *find_next(free_block *block) {
  * @param block The block to remove
  */
 void remove_free_block(free_block *block) {
+    // Update the LAST_ALLOCATION_POINT if needed
+    if (LAST_ALLOCATION_POINT == block) {
+        LAST_ALLOCATION_POINT = block->next;
+    }
+
     free_block *curr = HEAD;
     if(curr == block) {
         HEAD = block->next;
@@ -109,6 +114,11 @@ void *coalesce(free_block *block) {
     if (prev != NULL) {
         char *end_of_prev = (char *)prev + prev->size + sizeof(free_block);
         if (end_of_prev == (char *)block) {
+            // If LAST_ALLOCATION_POINT is block, update it to prev
+            if (LAST_ALLOCATION_POINT == block) {
+                LAST_ALLOCATION_POINT = prev;
+            }
+
             prev->size += block->size + sizeof(free_block);
 
             // Ensure prev->next is updated to skip over 'block', only if 'block' is directly next to 'prev'.
@@ -123,6 +133,11 @@ void *coalesce(free_block *block) {
     if (next != NULL) {
         char *end_of_block = (char *)block + block->size + sizeof(free_block);
         if (end_of_block == (char *)next) {
+            // If LAST_ALLOCATION_POINT is next, update it to block
+            if (LAST_ALLOCATION_POINT == next) {
+                LAST_ALLOCATION_POINT = block;
+            }
+
             block->size += next->size + sizeof(free_block);
 
             // Ensure block->next is updated to skip over 'next'.
@@ -178,48 +193,56 @@ void *tumalloc(size_t size) {
 
     // If the free list is empty, allocate from the OS
     if (HEAD == NULL) {
+        LAST_ALLOCATION_POINT = NULL;
         return do_alloc(size);
     }
     
-    // Search the free list for a block using Best Fit strategy
-    free_block *curr = HEAD;
-    free_block *best_fit = NULL;
-    size_t best_fit_size = (size_t)-1;  // Start with maximum possible value
+    // Prepare for Next Fit search
+    free_block *start;
+    free_block *curr;
     
-    // First pass: find the best fitting block
-    while (curr != NULL) {
-        // Check if current block is big enough and better than what we've found so far
-        if (curr->size >= size && curr->size < best_fit_size) {
-            best_fit = curr;
-            best_fit_size = curr->size;
+    // Start from the last allocation point, or HEAD if no previous allocation
+    if (LAST_ALLOCATION_POINT == NULL) {
+        start = HEAD;
+    } else {
+        start = LAST_ALLOCATION_POINT;
+    }
+    
+    curr = start;
+    
+    // First, try to find a block from the current position to the end
+    do {
+        // Check if current block is big enough
+        if (curr->size >= size) {
+            // Split the block if it's large enough
+            header *h = (header *)split(curr, size);
             
-            // If we find a perfect fit, stop searching
-            if (curr->size == size) {
-                break;
+            if (h != NULL) {
+                // Update last allocation point
+                LAST_ALLOCATION_POINT = curr->next;
+                
+                // Remove the block from the free list
+                remove_free_block(curr);
+                
+                // Set up the header
+                h->size = size;
+                h->magic = MAGIC_NUMBER;
+                
+                // Return pointer after the header
+                return (void *)((char *)h + sizeof(header));
             }
         }
-        curr = curr->next;
-    }
-    
-    // If we found a block that fits
-    if (best_fit != NULL) {
-        // Split the block if it's large enough
-        header *h = (header *)split(best_fit, size);
         
-        if (h != NULL) {
-            // Remove the block from the free list
-            remove_free_block(best_fit);
-            
-            // Set up the header
-            h->size = size;
-            h->magic = MAGIC_NUMBER;
-            
-            // Return pointer after the header
-            return (void *)((char *)h + sizeof(header));
+        // Move to the next block
+        curr = curr->next;
+        
+        // If we've reached the end, wrap around to the beginning
+        if (curr == NULL) {
+            curr = HEAD;
         }
-    }
+    } while (curr != start);  // Stop when we've examined all blocks
     
-    // No suitable block found, allocate from the OS
+    // If we get here, no suitable block was found in the free list
     return do_alloc(size);
 }
 
@@ -281,6 +304,7 @@ void tufree(void *ptr) {
     
     // Convert the header to a free block
     free_block *block = (free_block *)h;
+    block->size = h->size;
     
     // Add the block to the free list
     block->next = HEAD;
